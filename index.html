@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Auto WebRTC with Firebase Signaling</title>
+  <style>
+    body { font-family: Arial; text-align: center; margin: 2em; }
+    video { width: 45%; margin: 1em; border: 2px solid #333; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Auto WebRTC Video Call</h1>
+  <video id="localVideo" autoplay muted playsinline></video>
+  <video id="remoteVideo" autoplay playsinline></video>
+  <p id="status">Initializing...</p>
+
+  <!-- Firebase SDK -->
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+
+  <script>
+    // REPLACE THIS CONFIG WITH YOUR FIREBASE PROJECT CONFIG
+    const firebaseConfig = {
+      apiKey: "YOUR_API_KEY",
+      authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+      databaseURL: "https://YOUR_PROJECT_ID-default-rtdb.firebaseio.com",
+      projectId: "YOUR_PROJECT_ID",
+      storageBucket: "YOUR_PROJECT_ID.appspot.com",
+      messagingSenderId: "YOUR_SENDER_ID",
+      appId: "YOUR_APP_ID"
+    };
+
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+
+    const localVideo = document.getElementById('localVideo');
+    const remoteVideo = document.getElementById('remoteVideo');
+    const statusText = document.getElementById('status');
+
+    let localStream;
+    let pc;
+
+    const servers = {
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    };
+
+    const roomId = 'webrtc-room'; // fixed room ID, only 2 users connect
+
+    const roomRef = db.ref('rooms/' + roomId);
+
+    async function start() {
+      statusText.innerText = "Requesting camera access...";
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        localVideo.srcObject = localStream;
+        statusText.innerText = "Camera access granted. Setting up connection...";
+        await setupConnection();
+      } catch (err) {
+        statusText.innerText = "Camera access denied or error: " + err.message;
+        console.error(err);
+      }
+    }
+
+    async function setupConnection() {
+      pc = new RTCPeerConnection(servers);
+
+      pc.onicecandidate = event => {
+        if (event.candidate) {
+          roomRef.child('candidates').push(event.candidate.toJSON());
+        }
+      };
+
+      pc.ontrack = event => {
+        if (remoteVideo.srcObject !== event.streams[0]) {
+          remoteVideo.srcObject = event.streams[0];
+          statusText.innerText = "Connected!";
+        }
+      };
+
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+      const roomSnapshot = await roomRef.once('value');
+      const roomData = roomSnapshot.val();
+
+      if (!roomData) {
+        statusText.innerText = "Creating offer...";
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await roomRef.set({ offer: { type: offer.type, sdp: offer.sdp } });
+
+        roomRef.child('answer').on('value', async snapshot => {
+          const answer = snapshot.val();
+          if (answer && !pc.currentRemoteDescription) {
+            await pc.setRemoteDescription(new RTCSessionDescription(answer));
+            statusText.innerText = "Answer received, connected!";
+          }
+        });
+      } else {
+        statusText.innerText = "Answering offer...";
+        await pc.setRemoteDescription(new RTCSessionDescription(roomData.offer));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        await roomRef.child('answer').set({ type: answer.type, sdp: answer.sdp });
+        statusText.innerText = "Answer sent, connected!";
+      }
+
+      roomRef.child('candidates').on('child_added', async snapshot => {
+        const candidate = snapshot.val();
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch (e) {
+          console.error('Error adding received ice candidate', e);
+        }
+      });
+    }
+
+    start();
+  </script>
+</body>
+</html>
